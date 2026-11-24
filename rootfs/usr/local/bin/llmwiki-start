@@ -24,15 +24,18 @@ if read -r mem < /sys/fs/cgroup/memory.max 2>/dev/null && [ "$mem" != "max" ]; t
   MEM_MB=$(( mem / 1024 / 1024 ))
 fi
 if [ "$MEM_MB" -gt 0 ] && [ "$MEM_MB" -lt 900 ]; then
-  JAVA_HEAP="-Xmx160m"; NODE_HEAP=128
+  JAVA_HEAP="-Xmx128m -XX:ReservedCodeCacheSize=32m -XX:MaxDirectMemorySize=32m"; NODE_HEAP=128; JOBS=1
+elif [ "$MEM_MB" -gt 0 ] && [ "$MEM_MB" -lt 1800 ]; then
+  JAVA_HEAP="-Xmx256m"; NODE_HEAP=256; JOBS=1
 else
-  JAVA_HEAP="-XX:MaxRAMPercentage=30"; NODE_HEAP=384
+  JAVA_HEAP="-XX:MaxRAMPercentage=25"; NODE_HEAP=384; JOBS=$(( CPUS < 4 ? CPUS : 4 ))
 fi
+export LLMWIKI_PROCESS_CONCURRENCY="${LLMWIKI_PROCESS_CONCURRENCY:-$JOBS}"
 # The PDF extractor (opendataloader-pdf) runs a JVM per file: keep it small and single-threaded enough.
 export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:-$JAVA_HEAP -XX:+UseSerialGC -XX:ActiveProcessorCount=$CPUS -XX:MaxMetaspaceSize=128m -Xss512k -XX:TieredStopAtLevel=1 -Djava.awt.headless=true}"
 export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=$NODE_HEAP}"
 export UV_THREADPOOL_SIZE="$CPUS" OMP_NUM_THREADS="$CPUS" MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
-echo "llmwiki-start: ${CPUS} CPU(s), memory limit ${MEM_MB:-0} MB, workspace $WORKSPACE"
+echo "llmwiki-start: ${CPUS} CPU(s), memory limit ${MEM_MB:-0} MB, ${LLMWIKI_PROCESS_CONCURRENCY} document job(s) at a time, workspace $WORKSPACE"
 
 PUBLIC_URL="http://localhost:${PORT}"
 if [[ "${RAILWAY_PUBLIC_DOMAIN:-}" =~ ^[A-Za-z0-9.-]+$ ]]; then PUBLIC_URL="https://${RAILWAY_PUBLIC_DOMAIN}"; fi

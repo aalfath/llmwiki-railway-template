@@ -52,6 +52,10 @@ RUN uv venv /opt/mcp && uv pip install --python /opt/mcp/bin/python --require-ha
 COPY --from=web-build /usr/local/bin/node /usr/local/bin/node
 COPY --from=caddy /usr/bin/caddy /usr/local/bin/caddy
 COPY --from=src /src/api/ ./api/
+# Make the document-processing concurrency configurable (upstream: 4 parallel jobs, each
+# PDF one JVM); the start script sets 1 below 900 MB so small plans don't OOM-kill extractions.
+RUN sed -i 's/^PROCESS_CONCURRENCY = 4$/PROCESS_CONCURRENCY = max(1, int(os.environ.get("LLMWIKI_PROCESS_CONCURRENCY", "4")))/' api/domain/local_processor.py \
+ && grep -q 'LLMWIKI_PROCESS_CONCURRENCY' api/domain/local_processor.py
 COPY --from=src /src/mcp/ ./mcp/
 COPY --from=src /src/shared/ ./shared/
 COPY --from=src /src/llmwiki ./llmwiki
