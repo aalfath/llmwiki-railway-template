@@ -1,6 +1,6 @@
 # Deploy and Host LLM Wiki on Railway
 
-LLM Wiki is an open-source, AI-maintained personal wiki, based on Andrej Karpathy's LLM wiki idea. You upload papers, notes, PDFs and Office files, then connect Claude, Codex or any MCP client, and the AI writes interlinked wiki pages with footnote citations back to your sources and keeps them current.
+LLM Wiki is an open-source, AI-maintained personal wiki, based on Andrej Karpathy's LLM wiki idea. You upload papers, notes, Markdown and PDF files, then connect Claude, Codex or any MCP client, and the AI writes interlinked wiki pages with footnote citations back to your sources and keeps them current.
 
 ## About Hosting LLM Wiki
 
@@ -36,7 +36,7 @@ claude mcp add --transport http llmwiki https://YOUR-DOMAIN/mcp --header "Author
 
 Then ask Claude to read the guide and build pages from your uploaded sources. Anyone with the MCP token can read and change the wiki, so keep it secret. To revoke it, change `MCP_TOKEN` and redeploy.
 
-**Services and resources.** One service with three processes: the web app, the API (with a Java PDF extractor) and the MCP server, plus Caddy on `PORT`. The health check is `/healthz`. It runs on Railway's Free plan at 0.5 GB RAM and 1 vCPU (a 14-page PDF peaked at about 385 MB in our test). For very large PDFs, give the service 1 GB.
+**Services and resources.** One service with three processes: the web app, the API (with a Java PDF extractor) and the MCP server, plus Caddy on `PORT`. The health check is `/healthz`. It runs on Railway's Free plan at 0.5 GB RAM and 1 vCPU (two PDFs processed at once peaked at about 420 MB in our Railway test; documents are processed one at a time below 1.8 GB). For very large PDFs, give the service 1 GB.
 
 **Optional.** Set `MISTRAL_API_KEY` for better OCR of complex PDFs. Word and PowerPoint files need LibreOffice, which this image leaves out to stay small, so convert them to PDF first. Uploads are limited to 100 MB per file.
 
