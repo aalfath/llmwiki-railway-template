@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Start LLM Wiki's API, MCP server and web app on loopback, then Caddy on $PORT.
+# Exits non-zero as soon as any of them stops, so Railway's ON_FAILURE policy restarts the service.
+set -euo pipefail
+
+export PORT="${PORT:-8080}"
+export LLMWIKI_USERNAME="${LLMWIKI_USERNAME:-admin}"
+WORKSPACE="${WORKSPACE_PATH:-/data/llmwiki}"
+export WORKSPACE_PATH="$WORKSPACE"
+
+fail() { echo "llmwiki-start: $*" >&2; exit 1; }
+
+[[ "${LLMWIKI_PASSWORD:-}" =~ ^.{12,}$ ]] || fail "LLMWIKI_PASSWORD must be set (12 or more characters)."
+[[ "${MCP_TOKEN:-}" =~ ^[A-Za-z0-9_-]{24,}$ ]] || fail "MCP_TOKEN must be 24 or more letters, digits, - or _."
+[[ "$LLMWIKI_USERNAME" =~ ^[A-Za-z0-9._@-]+$ ]] || fail "LLMWIKI_USERNAME may only hold letters, digits and . _ @ -"
+
+# CPUs and memory from the cgroup, not the host (Railway shows 32+ CPUs inside a 1 vCPU service).
+CPUS=2
+if read -r quota period < /sys/fs/cgroup/cpu.max 2>/dev/null && [ "$quota" != "max" ]; then
+  CPUS=$(( (quota + period - 1) / period )); [ "$CPUS" -ge 1 ] || CPUS=1
+fi
+MEM_MB=0
+if read -r mem < /sys/fs/cgroup/memory.max 2>/dev/null && [ "$mem" != "max" ]; then
+  MEM_MB=$(( mem / 1024 / 1024 ))
+fi
+if [ "$MEM_MB" -gt 0 ] && [ "$MEM_MB" -lt 900 ]; then
+  JAVA_HEAP="-Xmx160m"; NODE_HEAP=128
+else
+  JAVA_HEAP="-XX:MaxRAMPercentage=30"; NODE_HEAP=384
+fi
+# The PDF extractor (opendataloader-pdf) runs a JVM per file: keep it small and single-threaded enough.
+export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:-$JAVA_HEAP -XX:+UseSerialGC -XX:ActiveProcessorCount=$CPUS -XX:MaxMetaspaceSize=128m -Xss512k -XX:TieredStopAtLevel=1 -Djava.awt.headless=true}"
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=$NODE_HEAP}"
+export UV_THREADPOOL_SIZE="$CPUS" OMP_NUM_THREADS="$CPUS" MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
+echo "llmwiki-start: ${CPUS} CPU(s), memory limit ${MEM_MB:-0} MB, workspace $WORKSPACE"
+
+PUBLIC_URL="http://localhost:${PORT}"
+if [[ "${RAILWAY_PUBLIC_DOMAIN:-}" =~ ^[A-Za-z0-9.-]+$ ]]; then PUBLIC_URL="https://${RAILWAY_PUBLIC_DOMAIN}"; fi
+
+mkdir -p "$WORKSPACE"
+if [ ! -f "$WORKSPACE/.llmwiki/index.db" ]; then
+  echo "llmwiki-start: first boot, creating the workspace"
+  python /app/llmwiki init "$WORKSPACE"
+fi
+python -c "import sys; sys.path.insert(0, '/app/api'); from infra.db.local_migrations import apply_migrations; apply_migrations(sys.argv[1])" "$WORKSPACE/.llmwiki/index.db"
+
+# bcrypt hash for Caddy's basic auth; the plain password never reaches the Caddyfile.
+LLMWIKI_PASSWORD_HASH="$(printf '%s' "$LLMWIKI_PASSWORD" | caddy hash-password)" || fail "could not hash the password"
+export LLMWIKI_PASSWORD_HASH
+
+declare -A NAMES=()
+PIDS=()
+stop_all() { kill -TERM "${PIDS[@]}" 2>/dev/null || true; wait 2>/dev/null || true; }
+trap 'stop_all; exit 0' TERM INT
+
+wait_http() { # name url pid
+  for _ in $(seq 1 180); do
+    if python -c "import urllib.request,sys; urllib.request.urlopen(sys.argv[1], timeout=2)" "$2" 2>/dev/null; then return 0; fi
+    kill -0 "$3" 2>/dev/null || { stop_all; fail "$1 exited during startup"; }
+    sleep 0.5
+  done
+  stop_all; fail "$1 did not answer within 90 s"
+}
+
+cd /app/api
+APP_URL="http://localhost:3000" API_URL="/api" \
+  python -m uvicorn main:app --host 127.0.0.1 --port 8000 --no-access-log --timeout-graceful-shutdown 5 &
+PIDS+=("$!"); NAMES[$!]="API"
+wait_http API http://127.0.0.1:8000/health "$!"
+
+cd /app/mcp
+APP_URL="$PUBLIC_URL" API_URL="http://127.0.0.1:8000" \
+  /opt/mcp/bin/python -m local_server --workspace "$WORKSPACE" --transport streamable-http --port 8100 &
+PIDS+=("$!"); NAMES[$!]="MCP server"
+
+cd /app/web
+PORT=3000 HOSTNAME=127.0.0.1 node server.js &
+PIDS+=("$!"); NAMES[$!]="web app"
+wait_http "web app" http://127.0.0.1:3000/ "$!"
+
+cd /
+caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
+PIDS+=("$!"); NAMES[$!]="Caddy"
+echo "llmwiki-start: ready on port $PORT ($PUBLIC_URL)"
+
+# Poll (not wait -n) so any child exiting, with any status, stops the service with a non-zero code.
+while sleep 2; do
+  for pid in "${PIDS[@]}"; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      code=0; wait "$pid" || code=$?
+      echo "llmwiki-start: ${NAMES[$pid]} stopped (exit $code); stopping the service" >&2
+      stop_all
+      exit 1
+    fi
+  done
+done

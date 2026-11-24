@@ -1,0 +1,107 @@
+# Railway front for LLM Wiki. {$VAR} values come from the environment at start.
+{
+	admin off
+	auto_https off
+	persist_config off
+	servers {
+		trusted_proxies static 100.64.0.0/10 152.233.0.0/16
+	}
+	log {
+		level WARN
+	}
+}
+
+(mcp_upstream) {
+	reverse_proxy 127.0.0.1:8100 {
+		# The MCP SDK only accepts a loopback Host on a loopback listener.
+		header_up Host 127.0.0.1:8100
+		header_up -Authorization
+		flush_interval -1
+	}
+}
+
+:{$PORT} {
+	route {
+		# Health check for Railway: no login, answered by the API.
+		@health path /healthz
+		handle @health {
+			rewrite * /health
+			reverse_proxy 127.0.0.1:8000 {
+				header_up Host 127.0.0.1:8000
+			}
+		}
+
+		# MCP with the token in the path (clients that take only a URL, such as claude.ai).
+		@mcp_path path /mcp/{$MCP_TOKEN}
+		handle @mcp_path {
+			rewrite * /mcp
+			import mcp_upstream
+		}
+
+		# MCP with a bearer header (Claude Code, Codex, Cursor).
+		@mcp_bearer {
+			path /mcp
+			header Authorization "Bearer {$MCP_TOKEN}"
+		}
+		handle @mcp_bearer {
+			import mcp_upstream
+		}
+
+		@mcp_other path /mcp /mcp/*
+		handle @mcp_other {
+			header WWW-Authenticate "Bearer"
+			respond "MCP token missing or wrong. Sign in to this site and open /connect for your MCP URL." 401
+		}
+
+		# Everything else (web app and API) needs the generated login.
+		basic_auth {
+			{$LLMWIKI_USERNAME} {$LLMWIKI_PASSWORD_HASH}
+		}
+
+		# Browsers resend basic-auth credentials on cross-site requests, so refuse cross-site writes.
+		@cross_site {
+			not method GET HEAD OPTIONS
+			expression `{http.request.header.Sec-Fetch-Site} == "cross-site" || ({http.request.header.Origin} != "" && {http.request.header.Origin} != "https://" + {http.request.host} && {http.request.header.Origin} != "http://" + {http.request.hostport})`
+		}
+		handle @cross_site {
+			respond "Origin not allowed" 403
+		}
+
+		@connect path /connect
+		handle @connect {
+			header Content-Type "text/plain; charset=utf-8"
+			header Cache-Control "no-store"
+			respond <<TEXT
+				LLM Wiki on Railway: connect an MCP client
+
+				MCP URL with the token in it (claude.ai custom connector, ChatGPT, any client that takes only a URL):
+				  https://{http.request.host}/mcp/{$MCP_TOKEN}
+
+				Or the plain URL with a bearer header (Claude Code, Codex, Cursor):
+				  URL:    https://{http.request.host}/mcp
+				  Header: Authorization: Bearer {$MCP_TOKEN}
+
+				Claude Code:
+				  claude mcp add --transport http llmwiki https://{http.request.host}/mcp --header "Authorization: Bearer {$MCP_TOKEN}"
+
+				Keep this token secret: it gives full read and write access to your wiki.
+				TEXT 200
+		}
+
+		@api path /api/*
+		handle @api {
+			uri strip_prefix /api
+			reverse_proxy 127.0.0.1:8000 {
+				# Local mode only accepts a loopback Host and its own loopback origin; same-origin is checked above.
+				header_up Host 127.0.0.1:8000
+				header_up Origin ^https?://.+$ http://localhost:3000
+			}
+		}
+
+		handle {
+			reverse_proxy 127.0.0.1:3000 {
+				header_up Host 127.0.0.1:3000
+			}
+		}
+	}
+}
